@@ -151,6 +151,7 @@ class AirfoilPolars:
                     fp.close()
 
         self.polars = sorted(self.polars, key=lambda l: l[0])
+        self.Res = sorted(self.Res)
 
     def CreateCoefficientPolyfitTables(self):
         """
