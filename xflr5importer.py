@@ -321,8 +321,336 @@ class AirfoilPolars:
         tester = 1 / (refRe[1] - refRe[0])
         return (Re - refRe[0]) / (refRe[1] - refRe[0]) * (refCm[1] - refCm[0]) + refCm[0]
 
-    def KindOfBilinearApproximation(self, point, refPoints, refValues):
+
+class AirplanePolars:
+    def __init__(self, filePrefix="", fileDirectory="", parameterIdentifier="", CLfitOrder=1,
+                 CDfitOrder=2, CmfitOrder=1, weightedFit=False, plotFit=False):
         """
+        Class containing airplane polars read from file, as well as CL, CD and Cm interpolation functions
+
+        Each polar file differs by a parameter (Pr) in the name specified with a value of 5 digits, including
+        the decimal point, for example wing span of length 0.800 - "ws0.800"
+
+        Point pairs (Pr, AOA) as well as CL, CD and Cm at each point is stored in .points and .values(CL/CD/Cm)
+
+        :param filePrefix: an identifier for the airfoil file names, such as "T2_VLM2"
+        :param fileDirectory: location of files
+        :param fitOrder: degree of polynomial fit for CL, CD and Cm, default is 3 for performance
+        :param weightedFit: if True, the reader will add weight to polars near 2.5deg AOA
+                            using a cos function with period T = 40deg
+        :param plotFit: if True, the data will be scatter-plotted with poly fits
+        """
+
+        # Airfoil instance with characteristics read from files
+        self.airfoil = None
+
+        # Polars read from file
+        self.polars = []
+
+        # Point pairs (Pr, AOA) as well as CL CD and Cm at each point
+        self.points = []
+
+        self.valuesCL = []
+        self.valuesCD = []
+        self.valuesCm = []
+
+        # A list of Parameter values
+        self.Prs = []
+
+        # AOA, CL, CD, Cm at each Pr
+        self.AOAs_Pr = []
+        self.CLs_Pr = []
+        self.CDs_Pr = []
+        self.Cms_Pr = []
+
+        # Fit characteristics
+        self.CLfitOrder = CLfitOrder
+        self.CDfitOrder = CDfitOrder
+        self.CmfitOrder = CmfitOrder
+        self.weightedFit = weightedFit
+        self.plotFit = plotFit
+
+        # Polyfit coeffs at each Pr w.r.t. angle
+        self.CLfit_Pr = []
+        self.CDfit_Pr = []
+        self.Cmfit_Pr = []
+
+        # Keep some handy flags
+        self.importedPolars = False
+        self.createdCPolyfitTables = False
+
+        if filePrefix is not "" and fileDirectory is not "":
+            print("\nReading from xflr5 files...")
+            try:
+                # Try getting polars from file
+                self.xflr5AirplanePolarReader(filePrefix, fileDirectory, parameterIdentifier)
+                self.importedPolars = True
+
+            except:
+                self.importedPolars = False
+                print("Read unsuccessful!")
+
+            if self.importedPolars:
+                print("Read successful!")
+                print("\nCreating polynomial fits for coefficients...")
+                try:
+                    # Create lookup tables for CL, CD and Cm
+                    self.CreateCoefficientPolyfitTables()
+                    self.createdCPolyfitTables = True
+
+                except:
+                    print("Fit unsuccessful!")
+                    self.createdCPolyfitTables = False
+
+            if self.createdCPolyfitTables:
+                print("Fit successful!")
+                try:
+                    self.PlotPolyFit()
+
+                except:
+                    print("Plot unsuccessful")
+
+    def xflr5AirplanePolarReader(self, filePrefix, fileDirectory, parameterIdentifier):
+        """
+        Read polars from xflr5 output.
+
+        :param filePrefix: Name/prefix/identifier for the airfoil
+        :param fileDirectory: Directory containing files
+        :return: Dict of
+        """
+        for filename in os.listdir(fileDirectory):
+            if filePrefix in filename:
+                try:
+                    # Get Pr number
+                    currentPr = float(
+                        filename[filename.find(parameterIdentifier) + 2:filename.find(parameterIdentifier) + 7])
+
+                    # Open and detect "----" line
+                    fp = open(fileDirectory + "/" + filename)
+
+                    # Keep a value detection flag
+                    valuesFound = False
+
+                    # Keep a Pr-specific output polar list
+                    currentPolarsOutput = []
+
+                    for line in fp:
+                        if "Beta" in line:
+                            valuesFound = True
+                            continue
+
+                        if valuesFound and len(line) > 2:
+                            # Get AOA, Beta, CL, CDi, CDv, CD, CY, Cl and Cm, then pop Beta, CDi, CDv, CY, Cl
+                            # Then convert to float and attach to currentPolarsOutput
+                            polar = line.strip().split()[:9]
+                            polar.pop(7)
+                            polar.pop(6)
+                            polar.pop(4)
+                            polar.pop(3)
+                            polar.pop(1)
+
+                            currentPolarsOutput.append([float(i) for i in polar])
+
+                    currentPolarsOutput = sorted(currentPolarsOutput, key=lambda l: l[0])
+                    self.polars.append([currentPr, currentPolarsOutput])
+                    self.Prs.append(currentPr)
+
+                except:
+                    print("An exception occurred")
+
+                finally:
+                    fp.close()
+
+        self.polars = sorted(self.polars, key=lambda l: l[0])
+        self.Prs = sorted(self.Prs)
+
+    def CreateCoefficientPolyfitTables(self):
+        """
+        Create organized polars for further use
+
+        A pair of Parameter value and angle of attack corresponding to CL, CD and Cm values
+        """
+        for currentPr in self.polars:
+            for currentPolar in currentPr[1]:
+                # Combine (Pr, AOA) as a point
+                self.points.append([currentPr[0], currentPolar[0]])
+
+                # Corresponding to CL, CD and Cm value
+                self.valuesCL.append(currentPolar[1])
+                self.valuesCD.append(currentPolar[2])
+                self.valuesCm.append(currentPolar[3])
+
+        for Pr in self.Prs:
+            self.AOAs_Pr.append([point[1] for point in self.points if point[0] == Pr])
+            self.CLs_Pr.append([self.valuesCL[i] for i in range(len(self.points)) if self.points[i][0] == Pr])
+            self.CDs_Pr.append([self.valuesCD[i] for i in range(len(self.points)) if self.points[i][0] == Pr])
+            self.Cms_Pr.append([self.valuesCm[i] for i in range(len(self.points)) if self.points[i][0] == Pr])
+
+            # Fit coefficients to AOAs
+            if self.weightedFit:
+                w = np.array([np.cos((a - 2.5) / 5 * np.pi / 4) for a in self.AOAs_Pr[-1]])
+                # Fit coefficients with weight
+                self.CLfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.CLs_Pr[-1],
+                                                self.CLfitOrder, w=w))
+                self.CDfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.CDs_Pr[-1],
+                                                self.CDfitOrder, w=w))
+                self.Cmfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.Cms_Pr[-1],
+                                                self.CmfitOrder, w=w))
+
+            else:
+                self.CLfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.CLs_Pr[-1], self.CLfitOrder))
+                self.CDfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.CDs_Pr[-1], self.CDfitOrder))
+                self.Cmfit_Pr.append(np.polyfit(self.AOAs_Pr[-1], self.Cms_Pr[-1], self.CmfitOrder))
+
+    def PlotPolyFit(self):
+        """
+        Plot coefficient fits
+        """
+        if self.plotFit:
+            # Plot fit output
+            xp = np.linspace(-6, 10, 30)
+            fig = plt.figure()
+            axCL = fig.add_subplot(1, 3, 1, projection='3d')
+            axCD = fig.add_subplot(1, 3, 2, projection='3d')
+            axCm = fig.add_subplot(1, 3, 3, projection='3d')
+            for i in range(len(self.Prs)):
+                colorCoefx = i * 1.0 / len(self.Prs)
+                colorCoef = colorCoefx ** 2
+                axCL.scatter3D(np.ones(len(self.AOAs_Pr[i])) * self.Prs[i],
+                               self.AOAs_Pr[i], self.CLs_Pr[i], alpha=0.5, s=1.5,
+                               color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+                axCL.plot(np.ones(len(xp)) * self.Prs[i],
+                          xp, self.PolyEval(xp, self.CLfit_Pr[i]), lw=0.6,
+                          color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+                axCD.scatter3D(np.ones(len(self.AOAs_Pr[i])) * self.Prs[i],
+                               self.AOAs_Pr[i], self.CDs_Pr[i], alpha=0.5, s=1.5,
+                               color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+                axCD.plot(np.ones(len(xp)) * self.Prs[i],
+                          xp, self.PolyEval(xp, self.CDfit_Pr[i]), lw=0.6,
+                          color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+                axCm.scatter3D(np.ones(len(self.AOAs_Pr[i])) * self.Prs[i],
+                               self.AOAs_Pr[i], self.Cms_Pr[i], alpha=0.5, s=1.5,
+                               color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+                axCm.plot(np.ones(len(xp)) * self.Prs[i],
+                          xp, self.PolyEval(xp, self.Cmfit_Pr[i]), lw=0.6,
+                          color=(colorCoef ** 2, 1 - colorCoef, - 4 * (colorCoef - 0.5) ** 2 + 1))
+
+            # Set axes labels
+            axCL.set(xlabel="Parameter", ylabel="Angle of attack (degrees)", zlabel="CL")
+            axCD.set(xlabel="Parameter", ylabel="Angle of attack (degrees)", zlabel="CD")
+            axCm.set(xlabel="Parameter", ylabel="Angle of attack (degrees)", zlabel="Cm")
+
+            """# Plot polynomial coeffs w.r.t. parameter
+            axCL = fig.add_subplot(2, 3, 4)
+            axCD = fig.add_subplot(2, 3, 5)
+            axCm = fig.add_subplot(2, 3, 6)
+
+            for i in range(len(self.CLfit_Pr[0])):
+                axCL.plot(self.Prs, np.asarray(self.CLfit_Pr)[:, i])
+
+            for i in range(len(self.CDfit_Pr[0])):
+                axCD.plot(self.Prs, np.asarray(self.CDfit_Pr)[:, i])
+
+            for i in range(len(self.Cmfit_Pr[0])):
+                axCm.plot(self.Prs, np.asarray(self.Cmfit_Pr)[:, i])"""
+
+            plt.show(block=True)
+
+    def PolyEval(self, x, coefs):
+        returnVal = coefs[0]
+        for i in range(1, len(coefs)):
+            returnVal = returnVal * x + coefs[i]
+
+        return returnVal
+
+    def CL_function(self, Pr, angle):
+        # 2 ref values for Pr
+        refPr = [0, 0]
+        refCL = [0, 0]
+
+        for i in range(1, len(self.Prs)):
+            refPr = if_else(self.Prs[i] > Pr,
+                            if_else(Pr > self.Prs[i - 1], [self.Prs[i - 1], self.Prs[i]], refPr),
+                            refPr)
+
+        refPr = if_else(self.Prs[0] > Pr, [self.Prs[0], self.Prs[1]],
+                        if_else(self.Prs[-1] < Pr, [self.Prs[-2], self.Prs[-1]], refPr))
+
+        for i in range(1, len(self.Prs)):
+            refCL[0] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.CLfit_Pr[i - 1]),
+                               refCL[0])
+
+            refCL[1] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.CLfit_Pr[i]),
+                               refCL[1])
+
+        # If an exception is thrown, the operating point extends beyond Pr value range
+        tester = 1 / (refPr[1] - refPr[0])
+        return (Pr - refPr[0]) / (refPr[1] - refPr[0]) * (refCL[1] - refCL[0]) + refCL[0]
+
+    def CD_function(self, Pr, angle):
+        # 2 ref values for Pr
+        refPr = [0, 0]
+        refCD = [0, 0]
+
+        for i in range(1, len(self.Prs)):
+            refPr = if_else(self.Prs[i] > Pr,
+                            if_else(Pr > self.Prs[i - 1], [self.Prs[i - 1], self.Prs[i]], refPr),
+                            refPr)
+
+        refPr = if_else(self.Prs[0] > Pr, [self.Prs[0], self.Prs[1]],
+                        if_else(self.Prs[-1] < Pr, [self.Prs[-2], self.Prs[-1]], refPr))
+
+        for i in range(1, len(self.Prs)):
+            refCD[0] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.CDfit_Pr[i - 1]),
+                               refCD[0])
+
+            refCD[1] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.CDfit_Pr[i]),
+                               refCD[1])
+
+        # If an exception is thrown, the operating point extends beyond Pr value range
+        tester = 1 / (refPr[1] - refPr[0])
+        return (Pr - refPr[0]) / (refPr[1] - refPr[0]) * (refCD[1] - refCD[0]) + refCD[0]
+
+    def Cm_function(self, Pr, angle):
+        # 2 ref values for Pr
+        refPr = [0, 0]
+        refCm = [0, 0]
+
+        for i in range(1, len(self.Prs)):
+            refPr = if_else(self.Prs[i] > Pr,
+                            if_else(Pr > self.Prs[i - 1], [self.Prs[i - 1], self.Prs[i]], refPr),
+                            refPr)
+
+        refPr = if_else(self.Prs[0] > Pr, [self.Prs[0], self.Prs[1]],
+                        if_else(self.Prs[-1] < Pr, [self.Prs[-2], self.Prs[-1]], refPr))
+
+        for i in range(1, len(self.Prs)):
+            refCm[0] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.Cmfit_Pr[i - 1]),
+                               refCm[0])
+
+            refCm[1] = if_else(self.Prs[i] == refPr[1],
+                               self.PolyEval(angle, self.Cmfit_Pr[i]),
+                               refCm[1])
+
+        # If an exception is thrown, the operating point extends beyond Pr value range
+        tester = 1 / (refPr[1] - refPr[0])
+        return (Pr - refPr[0]) / (refPr[1] - refPr[0]) * (refCm[1] - refCm[0]) + refCm[0]
+
+
+"""
+Code bank for future revision
+        def KindOfBilinearApproximation(self, point, refPoints, refValues):
+        ""
         Input a set of 4 2-D reference points and corresponding reference values, return value at 2-D point
         https://math.stackexchange.com/a/832635
 
@@ -330,7 +658,7 @@ class AirfoilPolars:
         :param refPoints:
         :param refValues:
         :return: doesnt work
-        """
+        ""
         kind = 'inner'
         tempX = []
         tempZ = []
@@ -353,9 +681,6 @@ class AirfoilPolars:
         y = point[1]
         return a[0] * (x ** 2) + a[1] * (x * y) + a[2] * (y ** 2) + a[3] * x + a[4] * y + a[5]
 
-
-"""
-Code bank for future revision
 
                 # Create interpolate functions for CL, CDp and Cm
                 # tempPoints = np.asarray(self.points)
